@@ -23,6 +23,7 @@ from rdkit import Chem
 import torch
 from torch_geometric.data import Data
 
+import os
 
 from torch_geometric.utils import (remove_self_loops, degree,
                                    batched_negative_sampling)
@@ -36,12 +37,14 @@ parser.add_argument('--rel_total', type=int, default=86, help='num of interactio
 parser.add_argument('--lr', type=float, default=1e-3, help='learning rate')
 parser.add_argument('--n_epochs', type=int, default=128, help='num of epochs')
 parser.add_argument('--kge_dim', type=int, default=128, help='dimension of interaction matrix')# 200 used
-parser.add_argument('--batch_size', type=int, default=256, help='batch size')                   #1024 used
+parser.add_argument('--batch_size', type=int, default=1024, help='batch size')                   #1024 used
 parser.add_argument('--channels', type=int, default=55, help='num of channels')
 parser.add_argument('--weight_decay', type=float, default=5e-4)
 parser.add_argument('--neg_samples', type=int, default=1)
 parser.add_argument('--data_size_ratio', type=int, default=1)
-parser.add_argument('--use_cuda', type=bool, default=True, choices=[0, 1])
+parser.add_argument(
+
+    '--use_cuda', type=bool, default=True, choices=[0, 1])
 parser.add_argument('--pkl_name', type=str, default='inductive.pkl')
 
 args = parser.parse_args()
@@ -62,22 +65,51 @@ data_size_ratio = args.data_size_ratio
 cuda_available = torch.cuda.is_available()
 
 # 根据 CUDA 的可用性和用户的选择来设置设备
-if cuda_available:
-    device = torch.device("cuda")  # 如果有 GPU 可用，使用 GPU
-else:
-    device = torch.device("cpu")  # 否则使用 CPU
+# if cuda_available:
+#     device = torch.device("cuda")  # 如果有 GPU 可用，使用 GPU
+# else:
+#     device = torch.device("cpu")  # 否则使用 CPU
+device = torch.device("cpu")  # 否则使用 CPU
+import logging
+import os
+from datetime import datetime
+from torch_geometric.utils import subgraph
+# 创建日志文件夹
+os.makedirs("logs", exist_ok=True)
+
+# 日志文件名按时间命名
+log_filename = f"logs/train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+
+# 设置日志格式与输出目标
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler(log_filename),     # 输出到文件
+        logging.StreamHandler()                # 同时输出到控制台
+    ]
+)
+
+# 替代 logger.info()
+logger = logging.getLogger(__name__)
+
 
 
 # 打印设备信息
-print(f"Using device: {device}")
+logger.info(f"Using device: {device}")
 #device = torch.device("cuda")
-print(args)
+logger.info(args)
 ############################################################
 
 ###### Dataset
-df_ddi_train = pd.read_csv('inductive_data/fold1/train.csv')
-df_ddi_s1 = pd.read_csv('inductive_data/fold1/s1.csv')
-df_ddi_s2 = pd.read_csv('inductive_data/fold1/s2.csv')
+base_dir = os.path.dirname(os.path.abspath(__file__))
+logger.info(base_dir)
+file_path_train = os.path.join(base_dir, 'inductive_data','fold1', 'train.csv')
+file_path_s1 = os.path.join(base_dir, 'inductive_data','fold1', 's1.csv')
+file_path_s2 = os.path.join(base_dir, 'inductive_data','fold1', 's2.csv')
+df_ddi_train = pd.read_csv(file_path_train)
+df_ddi_s1 = pd.read_csv(file_path_s1)
+df_ddi_s2 = pd.read_csv(file_path_s2)
 
 
 train_tup = [(h, t, r) for h, t, r in zip(df_ddi_train['d1'], df_ddi_train['d2'], df_ddi_train['type'])]
@@ -88,7 +120,7 @@ train_data = DrugDataset(train_tup, ratio=data_size_ratio, neg_ent=neg_samples)
 s1_data = DrugDataset(s1_tup, disjoint_split=True)
 s2_data = DrugDataset(s2_tup, disjoint_split=True)
 
-print(f"Training with {len(train_data)} samples, s1 with {len(s1_data)}, and s2 with {len(s2_data)}")
+logger.info(f"Training with {len(train_data)} samples, s1 with {len(s1_data)}, and s2 with {len(s2_data)}")
 
 train_data_loader = DrugDataLoader(train_data, batch_size=batch_size, shuffle=True,num_workers=2)
 s1_data_loader = DrugDataLoader(s1_data, batch_size=batch_size *3,num_workers=2)
@@ -158,7 +190,7 @@ class RCGRL_IVGenerator(nn.Module):
         # 获取边得分（IVs）
         edge_scores = self.q_net(data)
 
-        # 使用 ProcessNet 获取鲁棒图和全图数据
+        #使用 ProcessNet 获取鲁棒图和全图数据  原始代码
         (robust_x, robust_edge_index, _, _, robust_batch), \
         (_, _, _, _, _), _ = self.process_net(data, edge_scores)
 
@@ -178,29 +210,11 @@ class QNet(nn.Module):  # The q(.) for calculating IVs
         )
 
     def forward(self, data):
-        print(data)
-        print(data.x)
-        print(data.edge_index)
-        print(data.edge_attr)
-        print("attr  above")
-        print("weidu ",data.x.dim(),data.edge_index.dim(),data.edge_attr.dim())
         q = self.convq1(data.x, data.edge_index,data.edge_attr.view(-1))
-        print("q1",q)
-        print("q1.shape",q.shape)
         q = self.convq2(q, data.edge_index,data.edge_attr.view(-1))
-        print("q2",q)
-        print("q2.shape",q.shape)
-
         row, col = data.edge_index
-        print("row",row)
-        print("row.shape",row.shape)
-        print("col",col)
-        print("col.shape",col.shape)
         edge_rep = torch.cat([q[row], q[col]], dim=-1)
-        print("edge_rep",edge_rep)
-        print("edge_rep.shape",edge_rep.shape)
         edge_weight = self.mlp(edge_rep).view(-1)  # The edge wights as IVs
-        print("edge_weight",edge_weight)
         return edge_weight
 
 class ProcessNet(nn.Module):
@@ -222,20 +236,32 @@ class ProcessNet(nn.Module):
         x = self.conv2(x, data.edge_index, data.edge_attr.view(-1))
 
         # 标记边信息，分别稳健边和健全边
-        (robust_edge_index, robust_edge_attr, robust_edge_weight), \
-            (full_edge_index, full_edge_attr, full_edge_weight) = drop_info_return_full(data, edge_score, self.d)  # r
+        (robust_edge_index, robust_edge_attr, robust_edge_weight,robust_edge_index_tofull), \
+            (full_edge_index, full_edge_attr, full_edge_weight) = drop_info_return_full(data, edge_score, self.d,require_edge_reserve_index=True)  # r
+
+        row, col = robust_edge_index
 
         # 更新节点信息
-        robust_x, robust_edge_index, robust_batch, _ = relabel(x, robust_edge_index, data.batch)
-        full_x, full_edge_index, full_batch, _ = relabel(x, full_edge_index, data.batch)
+        robust_x, robust_edge_index, robust_batch, _ = relabel(robust_edge_attr, robust_edge_index, data.batch)
+        full_x, full_edge_index, full_batch, _ = relabel(robust_edge_attr, full_edge_index, data.batch)
+
 
         return (robust_x, robust_edge_index, robust_edge_attr, robust_edge_weight, robust_batch), \
             (full_x, full_edge_index, full_edge_attr, full_edge_weight, full_batch), \
             edge_score
 
 def relabel(x, edge_index, batch, pos=None):
+    print("x",x)
+    print("e",edge_index)
+    print("b",batch)
+    print(len(edge_index[0]))
+    print(edge_index[0])
+    print(len(edge_index[1]))
     num_nodes = x.size(0)
+    print("x.size(0): ", num_nodes)
     sub_nodes = torch.unique(edge_index)
+    print("sub_nodes: ", len(sub_nodes))
+    print(sub_nodes)
     x = x[sub_nodes]
     batch = batch[sub_nodes]
     row, col = edge_index
@@ -288,22 +314,22 @@ def drop_info_return_full(data, edge_score, d, require_edge_reserve_index=False)
         # robust_edge_weight = torch.cat([robust_edge_weight, single_mask[idx_reserve]])
         robust_edge_weight = torch.cat([robust_edge_weight, single_mask[idx_reserve]])
         idx_reserve_tn = torch.from_numpy(idx_reserve).to(device)
-        # print("idx_reserve is ", idx_reserve)
-        # print("edge_reserve_index is ", edge_reserve_index)
+        # logger.info("idx_reserve is ", idx_reserve)
+        # logger.info("edge_reserve_index is ", edge_reserve_index)
         # counter = counter + 1
-        # print("counter is", counter)
+        # logger.info("counter is", counter)
         # if counter == 64:
-        #     print(" ")
+        #     logger.info(" ")
         edge_reserve_index = torch.cat([edge_reserve_index, idx_reserve_tn + C])
-        # print("edge_reserve_index is ", edge_reserve_index)
+        # logger.info("edge_reserve_index is ", edge_reserve_index)
         full_edge_weight = torch.cat([full_edge_weight, single_mask])
 
         # robust_edge_attr = torch.cat([robust_edge_attr, edge_attr[idx_reserve]])
         robust_edge_attr = torch.cat([robust_edge_attr, edge_attr[idx_reserve]])
         full_edge_attr = torch.cat([full_edge_attr, edge_attr])
 
-        # print("edge_reserve_index is ", edge_reserve_index)
-        # print("C is ", C)
+        # logger.info("edge_reserve_index is ", edge_reserve_index)
+        # logger.info("C is ", C)
 
     if require_edge_reserve_index:
         return (robust_edge_index, robust_edge_attr, robust_edge_weight, edge_reserve_index), \
@@ -313,8 +339,8 @@ def drop_info_return_full(data, edge_score, d, require_edge_reserve_index=False)
             (full_edge_index, full_edge_attr, full_edge_weight)
 
 def do_compute(batch, device, model):
-        # print("do_computer")
-        # print(datetime.today())
+        # logger.info("do_computer")
+        # logger.info(datetime.today())
 
         '''
             *batch: (pos_tri, neg_tri)
@@ -322,9 +348,7 @@ def do_compute(batch, device, model):
         '''
 
         pos_tri, neg_tri = batch
-
         pos_tri = [tensor.to(device=device) for tensor in pos_tri]
-
         neg_tri = [tensor.to(device=device) for tensor in neg_tri]
         p_score = model(pos_tri)
         n_score = model(neg_tri)
@@ -344,63 +368,10 @@ def do_compute_metrics(probas_pred, target):
     ap= metrics.average_precision_score(target, probas_pred)
 
     return acc, auroc, f1_score, precision, recall, int_ap, ap
-# def train_rcgrl_dsn(model, iv_generator, train_loader, loss_fn, optimizer, args, device):
-#     model.train()
-#     iv_generator.train()
-#     print("train start")
-#     for epoch in range(args.epoch):
-#         # === 第一阶段：训练DSN-DDI部分 ===
-#         iv_generator.eval()
-#         model.train()
-#         total_loss = 0
-#         print("第%d次model train " % epoch)
-#         for batch in train_loader:
-#             batch = [t.to(device) for t in batch]
-#             scores = model(batch, iv_generator=iv_generator, use_rcgrl=True)
-#             labels = torch.ones_like(scores)
-#
-#             loss = loss_fn(scores, labels)
-#             optimizer.zero_grad()
-#             loss.backward()
-#             optimizer.step()
-#             total_loss += loss.item()
-#         print("第%d次IV train " % epoch)
-#         # === 第二阶段：训练RCGRL部分（图结构裁剪器） ===
-#         model.eval()
-#         iv_generator.train()
-#         rcgrl_loss_total = 0
-#
-#         for batch in train_loader:
-#             h_data = batch[0].to(device)  # 假设每个 batch 是一个三元组中的一个图
-#             edge_scores = iv_generator.q_net(h_data)
-#
-#             (robust_x, robust_edge_index, edge_attr, _, batch), _, _ = \
-#                 iv_generator.process_net(h_data, edge_scores)
-#
-#             # 生成鲁棒图的表示和预测
-#             set_masks(edge_attr, model)
-#             robust_x = model.get_graph_rep(robust_x, robust_edge_index, edge_attr, batch)
-#             robust_out = model.get_robust_pred(robust_x)
-#             clear_masks(model)
-#
-#             y = h_data.y.to(device)  # 标签
-#             rcgrl_loss = F.cross_entropy(robust_out, y)
-#             optimizer.zero_grad()
-#             rcgrl_loss.backward()
-#             optimizer.step()
-#             rcgrl_loss_total += rcgrl_loss.item()
-#
-#         print(f"[Epoch {epoch}] DDI Loss: {total_loss:.4f} | RCGRL Loss: {rcgrl_loss_total:.4f}")
+
 def train_rcgrl_dsn(model, iv_generator, train_loader, loss_fn, optimizer, args, device):
-    print("x")
-    model.train()
-    print("1")
-    iv_generator.train()
-    print("1")
     for epoch in range(args.n_epochs):
         # === 第一阶段：训练 DSN-DDI 模块 ===
-        iv_generator.eval()
-        model.train()
         total_loss = 0
         start = time.time()
         train_loss = 0
@@ -411,42 +382,68 @@ def train_rcgrl_dsn(model, iv_generator, train_loader, loss_fn, optimizer, args,
         val_loss_neg = 0
         train_probas_pred = []
         train_ground_truth = []
+        train_probas_pred_r = []
+        train_ground_truth_r = []
         val_probas_pred = []
         val_ground_truth = []
         n=0
-        # for batch in train_loader:
-        #     print("%d model",n)
-        #     n=n+1
-        #     model.train()
-        #     p_score, n_score, probas_pred, ground_truth = do_compute(batch, device, model)
-        #     train_probas_pred.append(probas_pred)
-        #     train_ground_truth.append(ground_truth)
-        #     loss, loss_p, loss_n = loss_fn(p_score, n_score)
-        #
-        #     optimizer.zero_grad()
-        #     loss.backward()
-        #     optimizer.step()
-        #
-        #     train_loss += loss.item() * len(p_score)
-        # train_loss /= len(train_data)#原始代码插入
-        # model.eval()
-        # iv_generator.train()
-        # rcgrl_loss_total = 0
+        model.train()
+        iv_generator.eval()
+        for batch in train_loader:
+            n=n+1
+            p_score, n_score, probas_pred, ground_truth = do_compute(batch, device, model)
+            #print("train type of batch: ", type(batch))
+            #print("batch", batch)
+            #print("batch end ")
+            train_probas_pred.append(probas_pred)
+            train_ground_truth.append(ground_truth)
+            loss, loss_p, loss_n = loss_fn(p_score, n_score)
+                #     optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            logger.info("epoch: ", epoch, " DDI model ", n, " loss:", loss, " loss_p:", loss_p, " loss_n:", loss_n)
+            train_loss += loss.item() * len(p_score)
+        train_loss /= len(train_data)#原始代码插入
+        model.eval()
+        iv_generator.train()
+        rcgrl_loss_total = 0
+        train_probas_pred = np.concatenate(train_probas_pred)
+        train_ground_truth = np.concatenate(train_ground_truth)
+        train_acc, train_auc_roc, train_f1, train_precision,train_recall,train_int_ap, train_ap =do_compute_metrics(train_probas_pred,train_ground_truth)
+        logger.info(f'Epoch: {epoch} ({time.time() - start:.4f}s), train_loss: {train_loss:.4f},'
+              f' train_auc_roc: {train_auc_roc:.4f},train_acc: {train_acc:.4f},'
+              f'train_f1: {train_f1:.4f},train_precision: {train_precision:.4f},'
+              f'train_int_ap: {train_int_ap:.4f},train_ap: {train_ap:.4f}')
         m = 0
         for batch in train_loader:
-            print("%d model", m)
             m = m + 1
             #假设 batch 中包含三元组 (drug1, drug2, relation, split)
+            print("batch")
+            for i, item in enumerate(batch):
+                if isinstance(item, torch.Tensor):
+                    print(f"Element {i} shape:", item.shape)
+                else:
+                    print(f"Element {i} is not a tensor:", type(item))
+            print("batch.pos_tri",len(batch[0]))
+            print(batch[0])
+            print(batch[0][0])
+            print(batch[0][0].x)
+            print("batch.neg_tri",len(batch[1]))
+            print(batch[1])
+            print("b")
+            print(batch)
             pos_tri,neg_tri = batch
+            #(pos_tri,"typeofpos",type(pos_tri))
+            #print(neg_tri,"typeofneg",type(neg_tri))
+            #print(batch,"batch",type(batch))
             #drug1_smiles, drug2_smiles, relation, split = batch
             pos_h_data, pos_t_data, pos_rels, pos_b_graph = pos_tri
-            print("pos",pos_tri)
-            print("pos_data",pos_h_data)
-            print("pos_t_data",pos_t_data)
-            print("pos_rels",pos_rels)
-            print("pos_b_graph",pos_b_graph)
-            print("end")
             neg_h_data, neg_t_data, neg_rels, neg_b_graph = neg_tri
+            print("pos_h_data", type(pos_h_data),pos_h_data.x.shape)
+            print("pos_t_data", type(pos_t_data),pos_t_data.x.shape)
+            print("pos_rels", type(pos_rels),pos_rels.shape)
+            print("pos_b_graph", type(pos_b_graph))
+            print("neg_h_data", type(neg_h_data),neg_h_data.x.shape)
             # 将 SMILES 转换为图结构
             h_data = pos_h_data # 转换为图   错 直接用dataload中的pos_tri和neg_tri中的data进行访问即可
             t_data = pos_t_data  # 转换为图
@@ -458,11 +455,16 @@ def train_rcgrl_dsn(model, iv_generator, train_loader, loss_fn, optimizer, args,
 
             # r使用 RCGRL 生成鲁棒图
             h_robust_x, h_robust_edge_index, h_robust_batch = iv_generator(h_data)
-            h_data_new = Data(h_robust_x, h_robust_edge_index)
+            h_data_new = Data(x=h_robust_x, edge_index=h_robust_edge_index,batch=h_robust_batch)
             t_robust_x, t_robust_edge_index, t_robust_batch = iv_generator(t_data)
-            t_data_new = Data(t_robust_x, t_robust_edge_index)
-            pos_tri_new = Data(h_data_new, t_data_new,relation,pos_b_graph)
-
+            t_data_new = Data(x=t_robust_x, edge_index=t_robust_edge_index,batch=t_robust_batch)
+            pos_tri_new = (h_data_new, t_data_new,relation,pos_b_graph)
+            print("h_robust_x",type(h_robust_x),h_robust_x.shape)
+            print("t_robust_x",type(t_robust_x),t_robust_x.shape)
+            print("h_robust_edge_index",type(h_robust_edge_index),h_robust_edge_index.shape)
+            print("h_robust_batch",type(h_robust_batch),h_robust_batch.shape)
+            #print("pos_tri_new",type(pos_tri_new))
+            #print(pos_tri_new)
             h_data = neg_h_data  # 转换为图   错 直接用dataload中的pos_tri和neg_tri中的data进行访问即可
             t_data = neg_t_data  # 转换为图
             relation = neg_rels
@@ -473,60 +475,40 @@ def train_rcgrl_dsn(model, iv_generator, train_loader, loss_fn, optimizer, args,
 
             # r使用 RCGRL 生成鲁棒图
             h_robust_x, h_robust_edge_index, h_robust_batch = iv_generator(h_data)
-            h_data_new = Data(h_robust_x, h_robust_edge_index)
+            h_data_new = Data(x=h_robust_x, edge_index=h_robust_edge_index,batch=h_robust_batch)
             t_robust_x, t_robust_edge_index, t_robust_batch = iv_generator(t_data)
-            t_data_new = Data(t_robust_x, t_robust_edge_index)
-            neg_tri_new = Data(h_data_new, t_data_new, relation, pos_b_graph)
-
-            batch_new = Data(pos_tri_new, neg_tri_new)
-
-            p_score, n_score, probas_pred, ground_truth = do_compute(batch, device, model)
-            train_probas_pred.append(probas_pred)
-            train_ground_truth.append(ground_truth)
+            t_data_new = Data(x=t_robust_x, edge_index=t_robust_edge_index,batch=t_robust_batch)
+            neg_tri_new = (h_data_new, t_data_new, relation, pos_b_graph)
+            print("neg")
+            print("h_robust_x", type(h_robust_x), h_robust_x.shape)
+            print(h_robust_edge_index)
+            print("t_robust_x", type(t_robust_x), t_robust_x.shape)
+            print(t_robust_edge_index)
+            print("h_robust_edge_index", type(h_robust_edge_index), h_robust_edge_index.shape)
+            print("h_robust_batch", type(h_robust_batch), h_robust_batch.shape)
+            print("neg_tri_new_type", type(neg_tri_new),len(neg_tri_new),neg_tri_new[0].x.shape)
+            print("pos_tri_new_type", type(pos_tri_new),len(pos_tri_new),pos_tri_new[0].x.shape)
+            batch_new = (pos_tri_new, neg_tri_new)
+            print("batch_new_type",type(batch_new))
+            p_score, n_score, probas_pred, ground_truth = do_compute(batch_new, device, model)
+            print("do_compute_finished")
+            train_probas_pred_r.append(probas_pred)
+            train_ground_truth_r.append(ground_truth)
             loss, loss_p, loss_n = loss_fn(p_score, n_score)
-
+            logger.info("epoch: ",epoch," Rubust model ",m, " loss:", loss, " loss_p:", loss_p, " loss_n:", loss_n)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            #
-            # scores = model((h_data, t_data, relation, split), iv_generator=iv_generator, use_rcgrl=True)#改到这了
-            #
-            # labels = torch.ones_like(scores)  # 假设是正样本，可扩展负采样
-            # loss = loss_fn(scores, labels)
-            #
-            # optimizer.zero_grad()
-            # loss.backward()
-            # optimizer.step()
-            # total_loss += loss.item()
+        train_probas_pred_r = np.concatenate(train_probas_pred_r)
+        train_ground_truth_r = np.concatenate(train_ground_truth_r)
+        train_acc, train_auc_roc, train_f1, train_precision,train_recall,train_int_ap, train_ap =do_compute_metrics(train_probas_pred_r,train_ground_truth_r)
 
-        print(f"[Epoch {epoch}] DDI Loss: {total_loss:.4f}")
-
-        # === 第二阶段：训练 RCGRL 的 QNet + ProcessNet ===
-        # model.eval()
-        # iv_generator.train()
-        # rcgrl_loss_total = 0
-        # for batch in train_loader:
-        #     h_data = batch[0].to(device)  # 假设每个 batch 是一个三元组中的一个图
-        #     edge_scores = iv_generator.q_net(h_data)
-        #
-        #     # 获取鲁棒图和全图的数据
-        #     (robust_x, robust_edge_index, _, _, robust_batch), \
-        #     (_, _, _, _, _), _ = iv_generator.process_net(h_data, edge_scores)
-        #
-        #     # 将鲁棒图数据传入 DSN-DDI 模型
-        #     set_masks(_, model)  # 使用 RCGRL 生成的掩码
-        #     robust_graph_x = model.get_graph_rep(robust_x, robust_edge_index, _, robust_batch)
-        #     robust_out = model.get_robust_pred(robust_graph_x)
-        #     clear_masks(model)
-        #
-        #     y = h_data.y.to(device)  # 标签
-        #     rcgrl_loss = F.cross_entropy(robust_out, y)
-        #     optimizer.zero_grad()
-        #     rcgrl_loss.backward()
-        #     optimizer.step()
-        #     rcgrl_loss_total += rcgrl_loss.item()
-        #
-        # print(f"[Epoch {epoch}] RCGRL Loss: {rcgrl_loss_total:.4f}")
+        logger.info(f'Epoch: {epoch} ({time.time() - start:.4f}s), train_loss: {train_loss:.4f},'
+              f' train_auc_roc: {train_auc_roc:.4f},train_acc: {train_acc:.4f},'
+              f'train_f1: {train_f1:.4f},train_precision: {train_precision:.4f},'
+              f'train_int_ap: {train_int_ap:.4f},train_ap: {train_ap:.4f}')
+        logger.info(f"[Epoch {epoch}] DDI Loss: {total_loss:.4f}")
+        logger.info("finished",epoch,",will go on")
 
 def test(s1_data_loader, s2_data_loader, model):
     s1_probas_pred = []
@@ -556,38 +538,33 @@ def test(s1_data_loader, s2_data_loader, model):
         s2_ground_truth = np.concatenate(s2_ground_truth)
         s2_acc, s2_auc_roc, s2_f1,s2_precision,s2_recall,s2_int_ap, s2_ap = do_compute_metrics(s2_probas_pred, s2_ground_truth)
 
-    print('\n')
-    print('============================== Best Result ==============================')
-    print(f'\t\ts1_acc: {s1_acc:.4f}, s1_roc: {s1_auc_roc:.4f}, s1_f1: {s1_f1:.4f}, s1_precision: {s1_precision:.4f},s1_recall: {s1_recall:.4f},s1_int_ap: {s1_int_ap:.4f},s1_ap: {s1_ap:.4f}')
-    print(f'\t\ts2_acc: {s2_acc:.4f}, s2_roc: {s2_auc_roc:.4f}, s2_f1: {s2_f1:.4f}, s2_precision: {s2_precision:.4f},s2_recall: {s2_recall:.4f},s2_int_ap: {s2_int_ap:.4f},s2_ap: {s2_ap:.4f}')
-print("3")
+    logger.info('\n')
+    logger.info('============================== Best Result ==============================')
+    logger.info(f'\t\ts1_acc: {s1_acc:.4f}, s1_roc: {s1_auc_roc:.4f}, s1_f1: {s1_f1:.4f}, s1_precision: {s1_precision:.4f},s1_recall: {s1_recall:.4f},s1_int_ap: {s1_int_ap:.4f},s1_ap: {s1_ap:.4f}')
+    logger.info(f'\t\ts2_acc: {s2_acc:.4f}, s2_roc: {s2_auc_roc:.4f}, s2_f1: {s2_f1:.4f}, s2_precision: {s2_precision:.4f},s2_recall: {s2_recall:.4f},s2_int_ap: {s2_int_ap:.4f},s2_ap: {s2_ap:.4f}')
 model = models.MVN_DDI(n_atom_feats, n_atom_hid, kge_dim, rel_total, heads_out_feat_params=[64,64,64,64], blocks_params=[2, 2, 2, 2])
 loss = custom_loss.SigmoidLoss()
 optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 optimizer2 = optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: 0.96 ** (epoch))
-print("4")
 q_net = QNet().to(device)#Qnet接受图数据
-print("5")
 process_net = ProcessNet(drop=0.75).to(device)
-print("6")
 iv_generator = RCGRL_IVGenerator(q_net, process_net)
-print("7")
 
-# print(model)
+# logger.info(model)
 model.to(device=device)
 
 
 if __name__ == '__main__':
-    # print("Train will begin")
-    print("first of  all")
+    # logger.info("Train will begin")
+    logger.info("first of  all")
     train_rcgrl_dsn(model,iv_generator,train_data_loader,loss, optimizer, args, device)  #s1_data_loader, s2_data_loader,
-    # print("!!Train has finished.Test_model will begin")
-    # print("!!!Train has finished.Test_model will begin")
-    # print("!!!!Train has finished.Test_model will begin")
+    # logger.info("!!Train has finished.Test_model will begin")
+    # logger.info("!!!Train has finished.Test_model will begin")
+    # logger.info("!!!!Train has finished.Test_model will begin")
     test_model = torch.load(pkl_name)
-    print("!!!!Test_model has finished,Test will begin")
-    print("!!!Test_model has finished,Test will begin")
-    print("！！Test_model has finished,Test will begin")
+    logger.info("!!!!Test_model has finished,Test will begin")
+    logger.info("!!!Test_model has finished,Test will begin")
+    logger.info("！！Test_model has finished,Test will begin")
     test(s1_data_loader, s2_data_loader, test_model)
-    print("Fnished")
+    logger.info("Fnished")
